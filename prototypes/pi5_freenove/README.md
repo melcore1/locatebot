@@ -98,6 +98,9 @@ What made it work (each was a real failure first):
 - **One pulse at a time.** Two or three pulses in a row overshoot (the first pulse from rest turns ~4°, following ones ~10°+).
 - **Stop short, then creep.** A detection takes ~1.2 s; driving through it near the target overshoots. Re-aim at > 4°, or a small offset grows into driving past the target.
 - **Clean start:** jump straight to the cruise power from standstill; a slow ramp lets one side start first and twists the car.
+- **Never drive blind** (2026-11-08, after two overshoots): a photo on the move that misses the target stops the car at once (it used to "keep aiming" and drive on until the ultrasonic hit the drill at 3 cm); the drive watchdog is 2.5 s. A low target right in front is below the camera: after an obstacle stop the car tilts the camera down (tilt > 1500 = down) and looks before calling it "something else".
+- **One big turn, then move:** lining up is one continuous pivot sized from botd's calibrated turn rate (`/state.turn_rates`, deg = rate·s + offset; left ≈ 193°/s, right ≈ 72°/s), with at most one smaller follow-up; offsets up to 12° are steered on the move (`/aim?rel=…&visual=1`). Strings of small pulses looked like constant fidgeting.
+- **Lost after driving → turn around:** one quick ~180° pivot (~1 s, not the 30 s measured turn), scan; then the two sides. The target is usually behind or beside the car after an overshoot. It turns and drives forward to it; reversing would be blind (the camera only looks forward). LocateAnything can return false matches (a dark machine part with a yellow panel for "drill"): check the photo.
 
 ## Phone app for demos (2026-11-08)
 `botd.py` serves `pi/web/` at `http://raspberrypi.local:8000/`. Anyone on the same Wi-Fi can watch the camera, drive, or type a request; the LLM handles requests from the laptop:

@@ -97,7 +97,7 @@ python3 laptop/choose.py go 1                  # orient → drive → arrive; pr
 
 | `go` says | Usually | Do |
 |---|---|---|
-| `drive ended: no_vision_update` / `lost it` | Small far target blurred on the move; the car drifted past it | `/stop`, `scan` again from here (it's often beside the car), `go` again |
+| `drive ended: no_vision_update` / `lost it` | Small far target blurred on the move; the car drifted past it | `go` now turns ~180° in one quick pivot and scans, then the sides, and drives to it if found. Otherwise `scan` again and check the photos yourself: a target cut off at the frame edge is easy to miss |
 | `blocked by something else -> sidestep` | Obstacle in the way | It sidesteps up to twice, then stops: report it |
 | `TimeoutError` on a request | Wi-Fi drop or botd restarting | `/stop`, `/state`, check the photo, carry on |
 | Arrived but the photo shows something else | Wrong choice or a moved object | Say so; rescan |

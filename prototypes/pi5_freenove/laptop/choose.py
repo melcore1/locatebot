@@ -154,6 +154,7 @@ def scan(item):
         print(f"  #{c['n']}: {c['bearing']:+.1f} deg, {c['width']}px wide (~{c['dist_hint_m']} m if 40 cm wide), "
               f"{'on the floor' if c['on_floor'] else 'raised'}, seen in {c['photo']}")
     print("sheet:", os.path.abspath(os.path.join(OUT, "sheet.jpg")))
+    return merged
 
 
 def nearest(boxes, W, expected, max_off=15):
@@ -173,6 +174,20 @@ def fine_turn(brg):
     return d, secs
 
 
+def big_turn(brg):
+    """ONE continuous pivot sized from botd's calibrated turn rate (deg = rate * s + offset), braked at the end.
+    Replaces strings of small pulses: one decisive turn, then move."""
+    try:
+        rates = car("/state").get("turn_rates") or {}
+    except Exception:
+        rates = {}
+    d = "right" if brg > 0 else "left"
+    rate, off = rates.get(d) or {"right": [72.0, -3.6], "left": [193.0, -7.2]}[d]
+    secs = max(0.04, min(1.5, (abs(brg) - off) / max(float(rate), 20.0)))
+    car(f"/turn?dir={d}&seconds={secs:.2f}", 30)
+    return d, secs
+
+
 def pan_find(item, width, say):
     """Car still: look with the camera for the target (similar size) and return its bearing, or None."""
     for pan in (-30, 30, -15, 15):
@@ -188,46 +203,50 @@ def pan_find(item, width, say):
     return None
 
 
-def turn_onto(item, brg, width, say, tries=8):
-    """Fine single pulses toward brg until the target is centred (re-finding it after each pulse)."""
+def turn_onto(item, brg, width, say, tries=2):
+    """One big turn toward brg (a second, smaller one only if the photo says it is still > 6 deg off)."""
     for _ in range(tries):
-        if abs(brg) <= 4:
+        if abs(brg) <= 6:
             return brg
-        d, secs = fine_turn(brg)
+        big_turn(brg)
         jpg = get(f"{CAR}/snap?pan=0", 30)
         bx, W, H, _ = detect(jpg, item)
-        step = {0.04: 4.0, 0.06: 7.0, 0.08: 10.0}[secs]
-        hit = nearest([x for x in bx if (x[2] - x[0]) >= 0.5 * width], W, brg - (step if d == "right" else -step), 20)
-        brg = hit[0] if hit else brg - (step if d == "right" else -step)
+        hit = nearest([x for x in bx if (x[2] - x[0]) >= 0.5 * width], W, 0.0, 35)
+        brg = hit[0] if hit else 0.0
     return brg
 
 
-def go(n):
+def turn_around_and_look(item):
+    """Lost it after driving: it is most likely behind us. One quick ~180 deg pivot, scan, return choices.
+    We turn and then drive FORWARD to it - the camera only looks forward, so reversing to it would be blind."""
+    log("  lost it -> turning around 180 deg to look behind")
+    car("/stop")
+    big_turn(-180)                                                  # one quick pivot (~1 s to the left)
+    return scan(item)
+
+
+def go(n, retry=True):
     data = json.load(open(os.path.join(OUT, "choices.json")))
     item = data["item"]
     c = next(x for x in data["choices"] if x["n"] == int(n))
     brg, width = c["bearing"], c["width"]
     log(f"go to choice #{n}: {item} at {brg:+.1f} deg, {width}px")
-    # ---- ORIENT: small braked pulses toward it, re-finding THAT object after each pulse ----
-    dpp, first, misses = 8.0, True, 0
-    for i in range(14):
-        if abs(brg) <= 4:
+    # ---- ORIENT: ONE big continuous turn toward it, one sharp photo; a second (smaller) turn only if still off ----
+    for i in range(3):
+        if abs(brg) <= 6:
             break
-        d, secs = fine_turn(brg)
-        k = 1
-        step_deg = {0.04: 4.0, 0.06: 7.0, 0.08: 10.0}[secs]
-        expected = brg - (step_deg if d == "right" else -step_deg)
+        d, secs = big_turn(brg)
         jpg = get(f"{CAR}/snap?pan=0", 30)
         boxes, W, H, how = detect(jpg, item)
-        hit = nearest(boxes, W, expected, 20)
+        hit = nearest(boxes, W, 0.0, 35)
         if hit:
-            brg, width = hit[0], hit[1][2] - hit[1][0]; misses = 0
-            log(f"  orient: {k} {d} pulse(s) -> choice #{n} now at {brg:+.1f} deg ({width:.0f}px)")
+            brg, width = hit[0], hit[1][2] - hit[1][0]
+            log(f"  turn: one {d} turn ({secs:.2f} s) -> choice #{n} now at {brg:+.1f} deg ({width:.0f}px)")
         else:
-            brg = expected; misses += 1
-            log(f"  orient: {k} {d} pulse(s) -> not re-found, expected at {brg:+.1f} deg (miss {misses})")
-            if misses > 2:
-                log("  lost the chosen object while orienting -> stop"); car("/stop"); return
+            side = pan_find(item, width, log)                       # turned past it: the camera looks for it
+            if side is None:
+                log("  lost the chosen object while turning -> stop"); car("/stop"); return
+            brg = side
     # ---- DRIVE: FAR = continuous straight, checked on the move; NEAR = short hops with sharp stopped photos ----
     NEAR_PX = 120                                   # box this wide (~2 m) -> stop short, then creep in with checked hops
     misses, reorients, arrived, sidesteps, hops = 0, 0, False, 0, 0
@@ -266,12 +285,8 @@ def go(n):
                 get(f"{CAR}/snap?pan=0", 30)
                 if side is not None:
                     log(f"  hop {hops}: box is beside the car at {side:+.1f} deg -> turn to it")
-                    for _ in range(6):
-                        fine_turn(side)
-                        hit, W, H = stopped_look()
-                        if hit:
-                            break
-                        side = side - (7 if side > 0 else -7)
+                    big_turn(side)
+                    hit, W, H = stopped_look()
                     if hit:
                         brg, b = hit; width = b[2] - b[0]; continue
             if not hit:
@@ -283,13 +298,13 @@ def go(n):
             log(f"  hop {hops} ({stopped}): choice #{n} at {brg:+.1f} deg, {width:.0f}px, sonar {son}")
             if is_arrival(brg, b, W, H, son) or (stopped == "arrived_at_obstacle" and abs(brg) < 15):
                 log(f"  ARRIVED at choice #{n}"); arrived = True; break
-            if abs(brg) > 4:
-                d, _ = fine_turn(brg)
-                reorients += 1; log(f"    re-orient: {d}")
+            if abs(brg) > 6:
+                d, _ = big_turn(brg)
+                reorients += 1; log(f"    re-orient: one {d} turn")
             continue
         # ---- FAR: continuous straight, photos on the move ----
         if not moving:
-            car("/goto?bearing=0&seconds=20&speed=30&visual=1&watchdog=4&wait=0", 15)
+            car(f"/goto?bearing={brg:.1f}&seconds=20&speed=30&visual=1&watchdog=2.5&wait=0", 15)
             moving = True; log("  driving straight (continuous)")
         jpg = get(f"{CAR}/snap?fast=1", 15)
         if width < 160:
@@ -305,6 +320,14 @@ def go(n):
             log(f"  drive ended: {res}")
             if res == "arrived_at_obstacle" and (width >= 0.3 * W or (hit and hit[1][2] - hit[1][0] >= 0.3 * W)):
                 log(f"  ARRIVED: the obstacle it stopped at is the box"); arrived = True; break
+            if res == "arrived_at_obstacle" and not hit:
+                # a low object right in front is below the camera's view: tilt down (> 1500 = down) and look
+                dj = get(f"{CAR}/snap?pan=0&tilt=1780", 30)
+                db, Wd, Hd, _ = detect(dj, item)
+                get(f"{CAR}/snap?pan=0&tilt=1500", 30)
+                if db:
+                    open(os.path.join(OUT, f"final_choice{n}_down.jpg"), "wb").write(dj)
+                    log("  ARRIVED: looked down - it's right in front of me"); arrived = True; break
             if res == "arrived_at_obstacle":
                 if sidesteps >= 2:
                     log("  stop: still blocked after 2 sidesteps"); break
@@ -326,15 +349,12 @@ def go(n):
             if not hit:
                 log("  stop: lost it"); break
             brg, b = hit; width = b[2] - b[0]
-            if abs(brg) > 4:
-                fine_turn(brg); reorients += 1
+            if abs(brg) > 6:
+                big_turn(brg); reorients += 1
             continue
         hit = nearest([x for x in boxes if 0.75 * width <= (x[2] - x[0]) <= 1.8 * width], W, 0.0, 25)
         if not hit:
-            misses += 1
-            log(f"    moving photo: not seen ({misses}/2)")
-            if misses < 2:
-                car("/aim?keep=1"); continue
+            log("    moving photo: not seen -> stop and look (never drive blind)")
             car("/stop"); moving = False; misses = 0             # stop and REALLY look
             hit, W, H = stopped_look()
             if not hit:
@@ -350,16 +370,29 @@ def go(n):
         log(f"    {'moving' if moving else 'stopped'}: choice #{n} at {brg:+.1f} deg, {width:.0f}px, sonar {son}")
         if is_arrival(brg, b, W, H, son):
             car("/stop"); moving = False; log(f"  ARRIVED at choice #{n}"); arrived = True; break
-        if abs(brg) > 4:
+        if abs(brg) > 12:                                     # far off: stop, one big turn
             if moving:
                 car("/stop"); moving = False
-            d, _ = fine_turn(brg); reorients += 1
-            log(f"    re-orient #{reorients}: {d}")
+            d, _ = big_turn(brg); reorients += 1
+            log(f"    re-orient #{reorients}: one {d} turn")
             continue
-        if moving:
-            car("/aim?keep=1")
+        if moving:                                            # small offset: steer toward it while driving
+            car(f"/aim?rel={brg:.1f}&visual=1" if abs(brg) > 2 else "/aim?keep=1")
     car("/stop")
     log(f"  done: arrived={arrived}, re-orients={reorients}, near hops={hops}, {time.time() - t_start:.0f} s")
+    if not arrived and retry and sidesteps < 2:
+        found = turn_around_and_look(item)
+        for extra in (90, 180):                                     # not behind: the sides (a passed target is often
+            if found:                                               # beside the car), so 270 deg, then 90 deg
+                break
+            log(f"  not behind -> turning {extra} deg more and looking")
+            big_turn(-extra)
+            found = scan(item)
+        if found:
+            best = min(found, key=lambda c: (abs(c["bearing"]) > 25, -c["width"]))   # in front first, then nearest
+            log(f"  found it behind me: choice #{best['n']} at {best['bearing']:+.1f} deg -> going to it")
+            return go(best["n"], retry=False)
+        log("  not anywhere around me -> stop")
     jpg = get(f"{CAR}/snap?pan=0", 30)
     open(os.path.join(OUT, f"final_choice{n}.jpg"), "wb").write(jpg)
     st = car("/state")
